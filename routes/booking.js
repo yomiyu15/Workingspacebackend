@@ -121,6 +121,8 @@ router.post("/", async (req, res) => {
     workspace_id,
     start_date,
     end_date,
+    start_time,
+    end_time,
     duration_unit,
     payment_status,
     source,
@@ -141,15 +143,17 @@ router.post("/", async (req, res) => {
     }
     const workspace = workspaceResult.rows[0]
 
-    const endDate = end_date || start_date
+    const duration = normalizeDuration(duration_unit)
+    const computedEndDate = end_date || start_date
 
+    // Check overlapping bookings
     const overlap = await pool.query(
       `SELECT COUNT(*) AS count
        FROM bookings
        WHERE workspace_id = $1
        AND daterange(start_date, end_date, '[]') && daterange($2, $3, '[]')
        AND status = ANY($4)`,
-      [workspace_id, start_date, endDate, ACTIVE_STATUSES],
+      [workspace_id, start_date, computedEndDate, ACTIVE_STATUSES],
     )
 
     const inventory = workspace.inventory_count || 1
@@ -157,8 +161,11 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ message: "No availability for the selected dates" })
     }
 
-    const duration = normalizeDuration(duration_unit)
-    const totalPrice = computeTotalPrice(workspace, start_date, endDate, duration)
+    const totalPrice = computeTotalPrice(workspace, start_date, computedEndDate, duration)
+
+    // Only set start_time / end_time for 1-day bookings
+    const timeForInsert =
+      duration === "day" ? { start_time: start_time || null, end_time: end_time || null } : { start_time: null, end_time: null }
 
     const insert = await pool.query(
       `INSERT INTO bookings (
@@ -166,6 +173,8 @@ router.post("/", async (req, res) => {
         workspace_id,
         start_date,
         end_date,
+        start_time,
+        end_time,
         duration_unit,
         total_price,
         currency,
@@ -175,14 +184,16 @@ router.post("/", async (req, res) => {
         addons,
         notes
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14
       )
       RETURNING id`,
       [
         userId,
         workspace_id,
         start_date,
-        endDate,
+        computedEndDate,
+        timeForInsert.start_time,
+        timeForInsert.end_time,
         duration,
         totalPrice,
         "ETB",
@@ -204,6 +215,7 @@ router.post("/", async (req, res) => {
     res.status(500).json({ message: "Server error creating booking" })
   }
 })
+
 
 router.get("/", async (_req, res) => {
   try {

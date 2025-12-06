@@ -13,6 +13,10 @@ const faqRouter = require("./routes/faq");
 const workspacesRouter = require("./routes/space");
 const locationsRouter = require("./routes/location");
 const uploadRouter = require("./routes/upload");
+const categoriesRouter = require("./routes/category")
+const contact = require("./routes/contact")
+
+
 const { seedDefaults } = require("./utils/seed");
 
 const pool = require("./db");
@@ -53,6 +57,8 @@ app.use("/api/workspaces", workspacesRouter);
 app.use("/api/spaces", workspacesRouter); // legacy compatibility
 app.use("/api/locations", locationsRouter);
 app.use("/api/upload", uploadRouter);
+app.use("/api/categories", categoriesRouter)
+app.use("/api/contact",contact)
 
 // Start server
 const PORT = process.env.PORT || 5000;
