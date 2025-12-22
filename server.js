@@ -15,8 +15,10 @@ const locationsRouter = require("./routes/location");
 const uploadRouter = require("./routes/upload");
 const categoriesRouter = require("./routes/category")
 const contact = require("./routes/contact")
-const plan = require("./routes/plan")
-const subscription = require("./routes/subscriptions")
+
+const memberships = require(
+"./routes/memberships"
+)
 
 
 const { seedDefaults } = require("./utils/seed");
@@ -61,8 +63,7 @@ app.use("/api/locations", locationsRouter);
 app.use("/api/upload", uploadRouter);
 app.use("/api/categories", categoriesRouter)
 app.use("/api/contact",contact)
-app.use("/api/plan",plan)
-app.use("api/subscriptions",subscription)
+app.use("/api/memberships",memberships)
 
 // Start server
 const PORT = process.env.PORT || 5000;
