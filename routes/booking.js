@@ -131,44 +131,88 @@ router.post("/", async (req, res) => {
   } = req.body
 
   if (!user_name || !email || !workspace_id || !start_date) {
-    return res.status(400).json({ message: "Name, email, workspace, and start date are required" })
+    return res
+      .status(400)
+      .json({ message: "Name, email, workspace, and start date are required" })
   }
 
+  const duration = normalizeDuration(duration_unit)
+
+  // Normalize / validate dates on the server
+  const start = new Date(start_date)
+  const requestedEnd = end_date ? new Date(end_date) : start
+  if (Number.isNaN(start.getTime()) || Number.isNaN(requestedEnd.getTime())) {
+    return res.status(400).json({ message: "Invalid start or end date" })
+  }
+  if (requestedEnd < start) {
+    return res
+      .status(400)
+      .json({ message: "End date must be the same or after start date" })
+  }
+
+  const computedEndDate = requestedEnd.toISOString().slice(0, 10) // keep as YYYY-MM-DD
+
+  const client = await pool.connect()
   try {
+    await client.query("BEGIN")
+
+    // 1) Ensure / upsert user
     const userId = await ensureUser({ name: user_name, email, phone })
 
-    const workspaceResult = await pool.query("SELECT * FROM workspaces WHERE id = $1", [workspace_id])
-    if (workspaceResult.rows.length === 0) {
+    // 2) Lock workspace row so inventory checks are safe
+    const wsResult = await client.query(
+      "SELECT * FROM workspaces WHERE id = $1 FOR UPDATE",
+      [workspace_id],
+    )
+    if (wsResult.rows.length === 0) {
+      await client.query("ROLLBACK")
       return res.status(404).json({ message: "Workspace not found" })
     }
-    const workspace = workspaceResult.rows[0]
+    const workspace = wsResult.rows[0]
+    const inventory = workspace.inventory_count || 1
 
-    const duration = normalizeDuration(duration_unit)
-    const computedEndDate = end_date || start_date
-
-    // Check overlapping bookings
-    const overlap = await pool.query(
-      `SELECT COUNT(*) AS count
-       FROM bookings
-       WHERE workspace_id = $1
-       AND daterange(start_date, end_date, '[]') && daterange($2, $3, '[]')
-       AND status = ANY($4)`,
-      [workspace_id, start_date, computedEndDate, ACTIVE_STATUSES],
+    // 3) Check overlapping active bookings for this workspace
+    const overlapResult = await client.query(
+      `
+      SELECT COUNT(*)::int AS active_count
+      FROM bookings
+      WHERE workspace_id = $1
+        AND status = ANY($2)
+        AND daterange(start_date, end_date, '[]')
+            && daterange($3::date, $4::date, '[]')
+      `,
+      [workspace_id, ACTIVE_STATUSES, start_date, computedEndDate],
     )
 
-    const inventory = workspace.inventory_count || 1
-    if (Number(overlap.rows[0].count) >= inventory) {
-      return res.status(400).json({ message: "No availability for the selected dates" })
+    const activeCount = overlapResult.rows[0]?.active_count ?? 0
+    if (activeCount >= inventory) {
+      await client.query("ROLLBACK")
+      return res
+        .status(400)
+        .json({ message: "No availability for the selected dates" })
     }
 
-    const totalPrice = computeTotalPrice(workspace, start_date, computedEndDate, duration)
+    // 4) Compute price
+    const totalPrice = computeTotalPrice(
+      workspace,
+      start_date,
+      computedEndDate,
+      duration,
+    )
 
-    // Only set start_time / end_time for 1-day bookings
+    // 5) Only set start_time / end_time for 1-day bookings
     const timeForInsert =
-      duration === "day" ? { start_time: start_time || null, end_time: end_time || null } : { start_time: null, end_time: null }
+      duration === "day"
+        ? {
+            start_time: start_time || null,
+            end_time: end_time || null,
+          }
+        : { start_time: null, end_time: null }
 
-    const insert = await pool.query(
-      `INSERT INTO bookings (
+    // 6) Insert booking
+    const insert = await client.query(
+      `
+      INSERT INTO bookings (
         user_id,
         workspace_id,
         start_date,
@@ -186,7 +230,8 @@ router.post("/", async (req, res) => {
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14
       )
-      RETURNING id`,
+      RETURNING id
+      `,
       [
         userId,
         workspace_id,
@@ -205,14 +250,19 @@ router.post("/", async (req, res) => {
       ],
     )
 
+    await client.query("COMMIT")
+
     const booking = await fetchBookingById(insert.rows[0].id)
-    res.status(201).json({
+    return res.status(201).json({
       message: "Booking created. Admin will confirm after review.",
       booking,
     })
   } catch (error) {
+    await client.query("ROLLBACK")
     console.error("Failed to create booking:", error)
-    res.status(500).json({ message: "Server error creating booking" })
+    return res.status(500).json({ message: "Server error creating booking" })
+  } finally {
+    client.release()
   }
 })
 
